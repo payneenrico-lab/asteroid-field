@@ -208,7 +208,8 @@
       master = ac.createGain(); master.gain.value = muted ? 0 : 0.35;
       // Compressor keeps overlapping explosions loud without distorting
       const comp = ac.createDynamicsCompressor();
-      comp.threshold.value = -14; comp.ratio.value = 6;
+      comp.threshold.value = -12; comp.ratio.value = 4;
+      comp.attack.value = 0.015; comp.release.value = 0.35;
       master.connect(comp).connect(ac.destination);
       noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
       const d = noiseBuf.getChannelData(0);
@@ -235,11 +236,11 @@
     return s;
   }
   // Short filtered noise click: the building block for cracks and crackle
-  function grain(t, dur, freq, q, vol) {
+  function grain(t, dur, freq, q, vol, dest) {
     const f = ac.createBiquadFilter(), g = ac.createGain();
     f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = q;
     g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    noiseSrc(t, dur).connect(f).connect(g).connect(master);
+    noiseSrc(t, dur).connect(f).connect(g).connect(dest || master);
   }
   // Falling pitch sweep with a quick decay (thumps, whines)
   function sweep(t, type, f0, f1, dur, vol) {
@@ -268,30 +269,87 @@
     }
   }
 
-  // Explosion for the ship or a saucer: a bright blast that rumbles down, a sub-bass
-  // thump, and scattered crackle. The saucer adds a falling electronic whine.
+  // ---------- Explosion sound ----------
+  // Explosions run through their own chain for weight and space:
+  //   bassBus -> soft saturation (adds harmonics so the low end is heard on small speakers)
+  //           -> lowpass -> expBus
+  //   expBus  -> low-shelf bass boost -> master
+  //           -> reverb (synthetic decaying-noise impulse) -> master
+  let expBus = null, bassBus = null;
+  function buildExplosionChain() {
+    expBus = ac.createGain(); expBus.gain.value = 1;
+    const shelf = ac.createBiquadFilter();
+    shelf.type = 'lowshelf'; shelf.frequency.value = 150; shelf.gain.value = 9;
+    expBus.connect(shelf).connect(master);
+
+    const len = Math.floor(ac.sampleRate * 2.4);
+    const ir = ac.createBuffer(2, len, ac.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.2);
+    }
+    const verb = ac.createConvolver(); verb.buffer = ir;
+    const verbTone = ac.createBiquadFilter(); verbTone.type = 'lowpass'; verbTone.frequency.value = 1800;
+    const wet = ac.createGain(); wet.gain.value = 0.4;
+    expBus.connect(verb).connect(verbTone).connect(wet).connect(master);
+
+    bassBus = ac.createGain(); bassBus.gain.value = 1;
+    const shaper = ac.createWaveShaper();
+    const curve = new Float32Array(1024);
+    for (let i = 0; i < curve.length; i++) { const x = (i / (curve.length - 1)) * 2 - 1; curve[i] = Math.tanh(2.2 * x); }
+    shaper.curve = curve; shaper.oversample = '2x';
+    const warm = ac.createBiquadFilter(); warm.type = 'lowpass'; warm.frequency.value = 900;
+    bassBus.connect(shaper).connect(warm).connect(expBus);
+  }
+  // Filtered noise with attack / hold / decay and a sweeping cutoff
+  function envNoise(t, f0, f1, dur, attack, hold, vol, dest) {
+    const f = ac.createBiquadFilter(), g = ac.createGain();
+    f.type = 'lowpass'; f.Q.value = 0.9;
+    f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + attack);
+    g.gain.setValueAtTime(vol, t + attack + hold);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    noiseSrc(t, dur).connect(f).connect(g).connect(dest);
+  }
+  // Oscillator with a falling pitch and attack / hold / decay
+  function envOsc(t, type, f0, f1, dur, hold, vol, dest) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t + 0.006);
+    g.gain.setValueAtTime(vol, t + 0.006 + hold);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g).connect(dest); o.start(t); o.stop(t + dur + 0.02);
+  }
+
+  // Explosion for the ship or a saucer: a short bright crack on top, a heavy body that
+  // rolls down in pitch, a sustained sub-bass boom and a long low rumble, with crackle
+  // and reverb tail. The ship's is bigger and has a second boom; the saucer adds a
+  // falling electronic whine.
   function explosion(kind) {
     if (!ac) return;
+    if (!expBus) buildExplosionChain();
     const t = ac.currentTime, ship = kind === 'ship';
-    const dur = ship ? 1.7 : 1.1;
-    const f = ac.createBiquadFilter(), g = ac.createGain();
-    f.type = 'lowpass'; f.Q.value = 1;
-    f.frequency.setValueAtTime(ship ? 2600 : 3400, t);
-    f.frequency.exponentialRampToValueAtTime(ship ? 55 : 110, t + dur);
-    g.gain.setValueAtTime(0.0001, t);
-    g.gain.exponentialRampToValueAtTime(ship ? 1.1 : 0.85, t + 0.012);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    noiseSrc(t, dur).connect(f).connect(g).connect(master);
-    sweep(t, 'sine', ship ? 150 : 190, ship ? 28 : 42, ship ? 0.7 : 0.5, ship ? 1.0 : 0.7);
-    const pops = ship ? 16 : 10;
+    const len = ship ? 2.8 : 1.9, k = ship ? 1 : 0.8;
+
+    envNoise(t, 5000, 700, 0.22, 0.004, 0, 0.45 * k, expBus);          // initial crack
+    envNoise(t, 1600, 80, len * 0.75, 0.01, 0.1, 0.8 * k, expBus);     // body
+    envNoise(t, 260, 45, len, 0.03, 0.35, 3.0 * k, bassBus);           // deep rumble
+    envOsc(t, 'sine', 100, 30, 1.2, 0.2, 1.1 * k, bassBus);            // sub boom
+    envOsc(t, 'triangle', 200, 55, 0.55, 0.04, 0.4 * k, bassBus);      // punch you can hear on laptop speakers
+
+    const pops = ship ? 18 : 11;
     for (let i = 0; i < pops; i++) {
-      grain(t + 0.03 + Math.random() * dur * 0.55, rand(0.02, 0.06), rand(1500, 5200), 2, rand(0.12, 0.32));
+      grain(t + 0.05 + Math.random() * len * 0.5, rand(0.02, 0.07), rand(900, 4200), 1.6, rand(0.08, 0.22), expBus);
     }
     if (ship) {
-      // second, deeper boom a moment later as the ship breaks apart
-      sweep(t + 0.18, 'sine', 90, 30, 0.6, 0.6);
+      // second boom as the ship breaks apart
+      envOsc(t + 0.24, 'sine', 75, 26, 1.2, 0.15, 0.95, bassBus);
+      envNoise(t + 0.24, 320, 40, 1.6, 0.03, 0.2, 2.2, bassBus);
     } else {
-      sweep(t, 'square', 1200, 70, 0.75, 0.08);
+      sweep(t, 'square', 1200, 70, 0.75, 0.06);
     }
   }
   const muteBtn = document.getElementById('mute');
@@ -1024,7 +1082,8 @@
         ctx.fillText('PAUSED', W / 2, H / 2);
         ctx.font = `${Math.round(fs * 0.7)}px "Press Start 2P", ui-monospace, monospace`;
         ctx.fillStyle = '#8a90b8';
-        ctx.fillText('Press P to resume', W / 2, H / 2 + fs * 2);
+        const touchOn = !document.getElementById('touch').hidden;
+        ctx.fillText(touchOn ? 'Tap HYP or SHD to resume' : 'Press P to resume', W / 2, H / 2 + fs * 2);
       }
     }
   }
@@ -1069,23 +1128,21 @@
     if (KEYMAP[e.code]) { input[KEYMAP[e.code]] = true; e.preventDefault(); }
     if ((e.code === 'ShiftLeft' || e.code === 'ShiftRight' || e.code === 'KeyH') && !e.repeat) input.hyper = true;
     if (e.code === 'KeyS' && !e.repeat) input.shield = true;
-    if (e.code === 'KeyP' && state === 'play') {
-      paused = !paused;
-      if (thrustGain) thrustGain.gain.value = 0;
-      if (siren) siren.g.gain.value = paused ? 0 : 0.045;
-    }
+    if (e.code === 'KeyP' && state === 'play') setPaused(!paused);
     if (e.code === 'KeyM') toggleMute();
     if (e.code === 'Enter' && state !== 'play') { e.preventDefault(); startGame(); }
   });
   window.addEventListener('keyup', e => { if (KEYMAP[e.code]) input[KEYMAP[e.code]] = false; });
   window.addEventListener('blur', () => { for (const k in input) input[k] = false; });
   document.addEventListener('visibilitychange', () => { 
-    if (document.hidden && state === 'play') {
-      paused = true;
-      if (thrustGain) thrustGain.gain.value = 0;
-      if (siren) siren.g.gain.value = 0;
-    }
+    if (document.hidden && state === 'play') setPaused(true);
   });
+  function setPaused(p) {
+    paused = p;
+    for (const k in input) input[k] = false;
+    if (thrustGain) thrustGain.gain.value = 0;
+    if (siren) siren.g.gain.value = paused ? 0 : 0.045;
+  }
 
   document.getElementById('startBtn').addEventListener('click', startGame);
   document.getElementById('againBtn').addEventListener('click', startGame);
@@ -1100,6 +1157,11 @@
     const down = e => {
       e.preventDefault(); initAudio();
       btn.classList.add('on');
+      // While paused, HYP or SHD resumes play instead of jumping or raising the shield
+      if (paused && state === 'play') {
+        if (k === 'hyper' || k === 'shield') setPaused(false);
+        return;
+      }
       input[k] = true;
       if (btn.setPointerCapture) try { btn.setPointerCapture(e.pointerId); } catch (_) {}
     };
