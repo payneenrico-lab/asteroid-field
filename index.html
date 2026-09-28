@@ -202,7 +202,16 @@
   // ---------- Audio ----------
   let ac = null, master = null, thrustGain = null, noiseBuf = null, muted = false;
   function initAudio() {
-    if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
+    if (ac && ac.state === 'closed') {
+      // The browser shut the audio down completely; start a fresh one
+      ac = null; expBus = null; bassBus = null; siren = null;
+    }
+    if (ac) {
+      // Phones suspend audio (iOS calls it "interrupted") when you leave the page.
+      // It can only be restarted from a tap or key press, so every input calls this.
+      if (ac.state !== 'running') ac.resume().catch(() => {});
+      return;
+    }
     try {
       ac = new (window.AudioContext || window.webkitAudioContext)();
       master = ac.createGain(); master.gain.value = muted ? 0 : 0.35;
@@ -1137,7 +1146,13 @@
   document.addEventListener('visibilitychange', () => { 
     if (document.hidden && state === 'play') setPaused(true);
   });
+  // Wake the audio back up on any tap, click or key press once the game has used sound.
+  // touchend and click matter on iPhone, which only allows audio to restart from those.
+  ['pointerdown', 'touchend', 'click', 'keydown'].forEach(type =>
+    window.addEventListener(type, () => { if (ac) initAudio(); }, { capture: true, passive: true }));
+
   function setPaused(p) {
+    if (!p) initAudio();
     paused = p;
     for (const k in input) input[k] = false;
     if (thrustGain) thrustGain.gain.value = 0;
