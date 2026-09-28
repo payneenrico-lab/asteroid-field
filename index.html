@@ -260,21 +260,34 @@
     o.connect(g).connect(master); o.start(t); o.stop(t + dur + 0.02);
   }
 
-  // Rock breaking: a dull thud, a gritty crunch, then sharp cracks as it splits.
-  // Bigger rocks are deeper, louder and crumble for longer.
+  // Rock breaking, in four layers (bigger rocks are deeper, heavier and crumble for longer):
+  //   1. a heavy stone thud with some body to it
+  //   2. a gritty crunch whose tone darkens as it fades
+  //   3. hollow stone-on-stone knocks as the pieces split
+  //   4. rubble: soft, low grains tumbling away over a short spread of time
+  // It goes through the explosion chain for bass weight and a touch of reverb.
   function rockBreak(size) {
     if (!ac) return;
+    if (!expBus) buildExplosionChain();
     const t = ac.currentTime;
-    sweep(t, 'triangle', [0, 170, 115, 80][size], [0, 70, 48, 34][size], 0.2 + size * 0.06, 0.25 + size * 0.15);
-    const crunch = 0.1 + size * 0.08;
-    const f = ac.createBiquadFilter(), g = ac.createGain();
-    f.type = 'bandpass'; f.frequency.value = [0, 2400, 1500, 950][size]; f.Q.value = 0.7;
-    g.gain.setValueAtTime(0.45 + size * 0.12, t); g.gain.exponentialRampToValueAtTime(0.001, t + crunch);
-    noiseSrc(t, crunch).connect(f).connect(g).connect(master);
-    const cracks = 3 + size * 2;
-    for (let i = 0; i < cracks; i++) {
-      grain(t + Math.random() * (0.05 + size * 0.06), rand(0.015, 0.05),
-            rand(700, 3800) / (0.6 + size * 0.3), 5, rand(0.15, 0.35));
+    const pick3 = arr => arr[size - 1];
+
+    envOsc(t, 'sine', pick3([150, 105, 72]), pick3([62, 44, 30]), pick3([0.25, 0.38, 0.55]), 0.03,
+           pick3([0.45, 0.7, 0.95]), bassBus);
+    envNoise(t, pick3([2400, 1700, 1200]), pick3([320, 210, 130]), pick3([0.18, 0.3, 0.45]), 0.004, 0.02,
+             pick3([0.55, 0.75, 0.95]), expBus);
+
+    const knocks = size + 1;
+    for (let i = 0; i < knocks; i++) {
+      const kt = t + i * rand(0.03, 0.06);
+      const f = rand(260, 620) * pick3([1.5, 1.1, 0.85]);
+      envOsc(kt, 'triangle', f, f * 0.75, 0.07, 0.005, rand(0.12, 0.2), expBus);
+    }
+
+    const rubble = pick3([4, 7, 11]), spread = pick3([0.12, 0.25, 0.42]);
+    for (let i = 0; i < rubble; i++) {
+      grain(t + 0.02 + Math.random() * spread, rand(0.03, 0.09),
+            rand(250, 1300) * pick3([1.4, 1.0, 0.8]), 1.2, rand(0.1, 0.24), expBus);
     }
   }
 
