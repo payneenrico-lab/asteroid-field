@@ -205,7 +205,11 @@
     if (ac) { if (ac.state === 'suspended') ac.resume(); return; }
     try {
       ac = new (window.AudioContext || window.webkitAudioContext)();
-      master = ac.createGain(); master.gain.value = muted ? 0 : 0.35; master.connect(ac.destination);
+      master = ac.createGain(); master.gain.value = muted ? 0 : 0.35;
+      // Compressor keeps overlapping explosions loud without distorting
+      const comp = ac.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.ratio.value = 6;
+      master.connect(comp).connect(ac.destination);
       noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
       const d = noiseBuf.getChannelData(0);
       for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
@@ -223,13 +227,72 @@
     g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
     o.connect(g).connect(master); o.start(t); o.stop(t + dur + 0.02);
   }
-  function boom(size) {
+  // A burst of white noise starting at a random point in the buffer, so repeats never sound identical
+  function noiseSrc(t, dur) {
+    const s = ac.createBufferSource();
+    s.buffer = noiseBuf; s.loop = true;
+    s.start(t, Math.random() * 0.9); s.stop(t + dur + 0.02);
+    return s;
+  }
+  // Short filtered noise click: the building block for cracks and crackle
+  function grain(t, dur, freq, q, vol) {
+    const f = ac.createBiquadFilter(), g = ac.createGain();
+    f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = q;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    noiseSrc(t, dur).connect(f).connect(g).connect(master);
+  }
+  // Falling pitch sweep with a quick decay (thumps, whines)
+  function sweep(t, type, f0, f1, dur, vol) {
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g).connect(master); o.start(t); o.stop(t + dur + 0.02);
+  }
+
+  // Rock breaking: a dull thud, a gritty crunch, then sharp cracks as it splits.
+  // Bigger rocks are deeper, louder and crumble for longer.
+  function rockBreak(size) {
     if (!ac) return;
-    const t = ac.currentTime, src = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
-    src.buffer = noiseBuf; f.type = 'lowpass'; f.frequency.value = 300 + (4 - size) * 350;
-    const dur = 0.25 + size * 0.18;
-    g.gain.setValueAtTime(0.5 + size * 0.15, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    src.connect(f).connect(g).connect(master); src.start(t); src.stop(t + dur);
+    const t = ac.currentTime;
+    sweep(t, 'triangle', [0, 170, 115, 80][size], [0, 70, 48, 34][size], 0.2 + size * 0.06, 0.25 + size * 0.15);
+    const crunch = 0.1 + size * 0.08;
+    const f = ac.createBiquadFilter(), g = ac.createGain();
+    f.type = 'bandpass'; f.frequency.value = [0, 2400, 1500, 950][size]; f.Q.value = 0.7;
+    g.gain.setValueAtTime(0.45 + size * 0.12, t); g.gain.exponentialRampToValueAtTime(0.001, t + crunch);
+    noiseSrc(t, crunch).connect(f).connect(g).connect(master);
+    const cracks = 3 + size * 2;
+    for (let i = 0; i < cracks; i++) {
+      grain(t + Math.random() * (0.05 + size * 0.06), rand(0.015, 0.05),
+            rand(700, 3800) / (0.6 + size * 0.3), 5, rand(0.15, 0.35));
+    }
+  }
+
+  // Explosion for the ship or a saucer: a bright blast that rumbles down, a sub-bass
+  // thump, and scattered crackle. The saucer adds a falling electronic whine.
+  function explosion(kind) {
+    if (!ac) return;
+    const t = ac.currentTime, ship = kind === 'ship';
+    const dur = ship ? 1.7 : 1.1;
+    const f = ac.createBiquadFilter(), g = ac.createGain();
+    f.type = 'lowpass'; f.Q.value = 1;
+    f.frequency.setValueAtTime(ship ? 2600 : 3400, t);
+    f.frequency.exponentialRampToValueAtTime(ship ? 55 : 110, t + dur);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(ship ? 1.1 : 0.85, t + 0.012);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    noiseSrc(t, dur).connect(f).connect(g).connect(master);
+    sweep(t, 'sine', ship ? 150 : 190, ship ? 28 : 42, ship ? 0.7 : 0.5, ship ? 1.0 : 0.7);
+    const pops = ship ? 16 : 10;
+    for (let i = 0; i < pops; i++) {
+      grain(t + 0.03 + Math.random() * dur * 0.55, rand(0.02, 0.06), rand(1500, 5200), 2, rand(0.12, 0.32));
+    }
+    if (ship) {
+      // second, deeper boom a moment later as the ship breaks apart
+      sweep(t + 0.18, 'sine', 90, 30, 0.6, 0.6);
+    } else {
+      sweep(t, 'square', 1200, 70, 0.75, 0.08);
+    }
   }
   const muteBtn = document.getElementById('mute');
   function toggleMute() {
@@ -425,7 +488,7 @@
     const r = rocks[i];
     rocks.splice(i, 1);
     burst(r.x, r.y, r.color, 10 + r.size * 8, 160, 3.2);
-    boom(r.size);
+    rockBreak(r.size);
     shake = Math.max(shake, r.size * 3);
     if (fromShip !== false) addScore(ROCK_SCORE[r.size]);
     if (r.size > 1) {
@@ -437,7 +500,7 @@
     ship.alive = false;
     burst(ship.x, ship.y, SHIP_FILL, 50, 220, 3.5);
     burst(ship.x, ship.y, '#ffffff', 20, 300, 2.5);
-    boom(3); shake = 12;
+    explosion('ship'); shake = 12;
     lives--;
     respawnT = 2.2;
     if (thrustGain) thrustGain.gain.value = 0;
@@ -488,7 +551,7 @@
   function destroySaucer(scored) {
     burst(saucer.x, saucer.y, '#ffffff', 30, 220, 3);
     burst(saucer.x, saucer.y, '#ffb347', 20, 160, 2.5);
-    boom(2); shake = Math.max(shake, 6);
+    explosion('saucer'); shake = Math.max(shake, 6);
     if (scored) addScore(saucer.cfg.score);
     removeSaucer();
   }
